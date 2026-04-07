@@ -174,6 +174,22 @@ lxc file push workers "$c/${hadoop_home}/etc/hadoop/"
 done
 
 ########################################
+# VERIFY SSH CONNECTIVITY
+########################################
+
+echo "Checking SSH connectivity..."
+
+for node in "${containers[@]}"; do
+  if ! lxc exec "$NameNode" -- sudo -u "$hadoop_user" \
+    ssh -o StrictHostKeyChecking=no -o BatchMode=yes "$node" hostname >/dev/null 2>&1; then
+    echo "ERROR: SSH to $node failed"
+    exit 1
+  fi
+done
+
+echo "SSH connectivity OK"
+
+########################################
 # CREATE HDFS DIRECTORIES
 ########################################
 
@@ -214,11 +230,22 @@ lxc exec "$NameNode" -- sudo -u "$hadoop_user" \
 ${hadoop_home}/sbin/start-yarn.sh
 
 ########################################
-# VERIFY
+# VERIFY (STRICT)
 ########################################
 
-echo "Cluster processes:"
-lxc exec "$NameNode" -- sudo -u "$hadoop_user" jps
+sleep 3
+
+echo "Verifying Hadoop processes..."
+
+jps_output=$(lxc exec "$NameNode" -- sudo -u "$hadoop_user" jps)
+
+echo "$jps_output"
+
+echo "$jps_output" | grep -q NameNode \
+  || { echo "ERROR: NameNode failed to start"; exit 1; }
+
+echo "$jps_output" | grep -q ResourceManager \
+  || { echo "ERROR: ResourceManager failed"; exit 1; }
 
 ########################################
 # CLEAN
