@@ -1,30 +1,23 @@
 #!/bin/bash
 set -e
-
-########################################
 # CONFIG
-########################################
-
 NAMENODE="namenode"
 DATANODES=("datanode1" "datanode2")
+HADOOP_USER="hdoop"
 
-########################################
 # HELPERS
-########################################
-
 fail() {
   echo "❌ $1"
   exit 1
 }
-
 pass() {
   echo "✅ $1"
 }
+run_hadoop() {
+  lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c "$1"
+}
 
-########################################
 # CHECK LXC
-########################################
-
 echo "===== CHECK: LXC ====="
 
 lxc list > /dev/null 2>&1 || fail "LXC not accessible"
@@ -35,104 +28,114 @@ done
 
 pass "All containers exist"
 
-########################################
-# CHECK CONTAINER STATE
-########################################
-
+# CHECK STATE
 echo "===== CHECK: CONTAINER STATE ====="
 
 for c in "$NAMENODE" "${DATANODES[@]}"; do
   state=$(lxc list "$c" -c s --format csv)
-  [ "$state" = "RUNNING" ] || fail "$c is not running"
+  [ "$state" = "RUNNING" ] || fail "$c not running"
 done
 
-pass "All containers running"
+pass "Containers running"
 
-########################################
 # CHECK HDFS
-########################################
-
 echo "===== CHECK: HDFS ====="
 
-lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
+run_hadoop "
 export HADOOP_HOME=/opt/hadoop
 export PATH=\$PATH:\$HADOOP_HOME/bin
 
-hdfs dfs -ls / >/dev/null 2>&1
-" || fail "HDFS not accessible"
+hdfs dfs -ls / >/dev/null
+" || fail "HDFS failed"
 
-pass "HDFS responding"
+pass "HDFS OK"
 
-########################################
 # CHECK YARN
-########################################
-
 echo "===== CHECK: YARN ====="
 
-lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
+run_hadoop "
 export HADOOP_HOME=/opt/hadoop
 export PATH=\$PATH:\$HADOOP_HOME/bin
 
-yarn node -list | grep -q RUNNING
-" || fail "YARN nodes not running"
+yarn node -list | grep RUNNING
+" >/dev/null || fail "YARN not healthy"
 
-pass "YARN nodes active"
+pass "YARN OK"
 
-########################################
-# CHECK HADOOP PROCESSES
-########################################
+# CHECK MAPREDUCE
+echo "===== CHECK: MAPREDUCE ====="
 
-echo "===== CHECK: HADOOP PROCESSES ====="
+run_hadoop "
+export HADOOP_HOME=/opt/hadoop
+export PATH=\$PATH:\$HADOOP_HOME/bin
 
-lxc exec "$NAMENODE" -- bash -c "jps" | grep -q NameNode \
-  || fail "NameNode process missing"
+hdfs dfs -rm -r -f /mr-test /mr-out || true
 
-lxc exec "$NAMENODE" -- bash -c "jps" | grep -q ResourceManager \
-  || fail "ResourceManager missing"
+echo 'mr test data hadoop mapreduce' > /tmp/mr.txt
 
-pass "Core Hadoop processes OK"
+hdfs dfs -mkdir -p /mr-test
+hdfs dfs -put /tmp/mr.txt /mr-test
 
-########################################
+hadoop jar \$HADOOP_HOME/share/hadoop/mapreduce/hadoop-mapreduce-examples*.jar \
+wordcount /mr-test /mr-out
+
+hdfs dfs -cat /mr-out/part-r-00000
+" | grep -q "mapreduce" || fail "MapReduce failed"
+
+pass "MapReduce OK"
+
 # CHECK SPARK
-########################################
-
 echo "===== CHECK: SPARK ====="
 
-lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
+run_hadoop "
 export SPARK_HOME=/opt/spark
 export HADOOP_HOME=/opt/hadoop
 export PATH=\$PATH:\$SPARK_HOME/bin:\$HADOOP_HOME/bin
 
-spark-shell --master yarn --deploy-mode client <<EOF
-sc.parallelize(1 to 5).count()
-EOF
-" | grep -q "res0: Long = 5" \
-  || fail "Spark test failed"
+spark-submit --master yarn \
+--class org.apache.spark.examples.SparkPi \
+\$SPARK_HOME/examples/jars/spark-examples*.jar 10
+" | grep -q "Pi is roughly" || fail "Spark failed"
 
-pass "Spark working"
+pass "Spark OK"
 
-########################################
-# CHECK HIVE
-########################################
+# CHECK HIVE + TEZ
+echo "===== CHECK: HIVE (TEZ) ====="
 
-echo "===== CHECK: HIVE ====="
-
-lxc exec "$NAMENODE" -- bash -c "
+run_hadoop "
 export HIVE_HOME=/opt/hive
 export PATH=\$PATH:\$HIVE_HOME/bin
 
-echo 'show databases;' | hive
-" | grep -qi "default" \
-  || fail "Hive query failed"
+hive -e '
+set hive.execution.engine=tez;
+CREATE TABLE IF NOT EXISTS test_tbl (x INT);
+INSERT INTO test_tbl VALUES (1),(2),(3);
+SELECT COUNT(*) FROM test_tbl;
+'
+" | grep -q "3" || fail "Hive/Tez failed"
 
-pass "Hive working"
+pass "Hive + Tez OK"
 
-########################################
+# PROCESSES
+echo "===== CHECK: PROCESSES ====="
+
+lxc exec "$NAMENODE" -- jps | grep -q NameNode \
+  || fail "NameNode missing"
+
+lxc exec "$NAMENODE" -- jps | grep -q ResourceManager \
+  || fail "ResourceManager missing"
+
+pass "Processes OK"
+
 # FINAL
-########################################
 
 echo ""
 echo "=================================="
-echo "ALL SYSTEMS OPERATIONAL"
-echo "Hadoop + YARN + Spark + Hive OK"
+echo "CLUSTER FULLY OPERATIONAL"
+echo ""
+echo "✔ HDFS"
+echo "✔ YARN"
+echo "✔ MapReduce"
+echo "✔ Spark"
+echo "✔ Hive (Tez)"
 echo "=================================="
