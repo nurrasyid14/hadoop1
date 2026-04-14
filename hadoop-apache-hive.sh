@@ -112,7 +112,6 @@ echo "Initializing metastore..."
 lxc exec "$NAMENODE" -- bash -c "
 export HIVE_HOME=/opt/hive
 export PATH=\$PATH:\$HIVE_HOME/bin
-
 schematool -dbType derby -initSchema || true
 "
 
@@ -154,7 +153,7 @@ hdfs dfs -put -f /opt/tez/* /apps/tez/
 lxc exec "$NAMENODE" -- bash -c "
 export HIVE_HOME=/opt/hive
 
-cat > \$HIVE_HOME/conf/hive-site.xml <<EOF
+cat > \$HIVE_HOME/conf/hive-site.xml <<'EOF'
 <configuration>
 
   <property>
