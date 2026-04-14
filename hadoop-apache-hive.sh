@@ -69,6 +69,27 @@ EOF
 "
 
 ########################################
+# WAIT FOR HDFS
+########################################
+
+echo "Waiting for HDFS to be ready..."
+
+lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
+export HADOOP_HOME=/opt/hadoop
+export PATH=\$PATH:\$HADOOP_HOME/bin
+
+for i in {1..10}; do
+  hdfs dfs -ls / >/dev/null 2>&1 && exit 0
+  echo 'HDFS not ready yet... retrying'
+  sleep 3
+done
+
+exit 1
+" || { echo "ERROR: HDFS is not running"; exit 1; }
+
+echo "HDFS is ready"
+
+########################################
 # HDFS PREP
 ########################################
 
@@ -130,8 +151,31 @@ hdfs dfs -put -f /opt/tez/* /apps/tez/
 # ENABLE TEZ IN HIVE
 ########################################
 
-lxc exec "$NAMENODE" -- bash -c "
-cat >> /opt/hive/conf/hive-site.xml <<EOF
+llxc exec "$NAMENODE" -- bash -c "
+export HIVE_HOME=/opt/hive
+
+cat > \$HIVE_HOME/conf/hive-site.xml <<EOF
+<configuration>
+
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://namenode:9000</value>
+  </property>
+
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>/user/hive/warehouse</value>
+  </property>
+
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:derby:;databaseName=metastore_db;create=true</value>
+  </property>
+
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>org.apache.derby.jdbc.EmbeddedDriver</value>
+  </property>
 
   <property>
     <name>hive.execution.engine</name>
@@ -141,6 +185,11 @@ cat >> /opt/hive/conf/hive-site.xml <<EOF
   <property>
     <name>tez.lib.uris</name>
     <value>\${fs.defaultFS}/apps/tez</value>
+  </property>
+
+  <property>
+    <name>tez.use.cluster.hadoop-libs</name>
+    <value>true</value>
   </property>
 
 </configuration>
