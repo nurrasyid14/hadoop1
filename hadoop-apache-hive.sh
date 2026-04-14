@@ -20,8 +20,6 @@ lxc list > /dev/null 2>&1 || { echo "LXC not available"; exit 1; }
 # INSTALL HIVE
 ########################################
 
-echo "Installing Hive on $NAMENODE"
-
 lxc exec "$NAMENODE" -- bash -c "
 set -e
 
@@ -29,14 +27,32 @@ HIVE_VERSION=${HIVE_VERSION}
 
 cd /opt
 
-if [ ! -d /opt/hive ]; then
-  echo 'Downloading Hive...'
-  wget https://archive.apache.org/dist/hive/hive-\${HIVE_VERSION}/apache-hive-\${HIVE_VERSION}-bin.tar.gz
-  tar -xzf apache-hive-\${HIVE_VERSION}-bin.tar.gz
-  mv apache-hive-\${HIVE_VERSION}-bin /opt/hive
-fi
+echo '===== DEBUG: installing Hive ====='
 
-ls /opt/hive/bin/hive
+# Ensure tools exist
+command -v wget >/dev/null 2>&1 || { echo 'Installing wget...'; apt-get update && apt-get install -y wget; }
+
+# Download
+echo 'Downloading Hive...'
+wget -nv https://archive.apache.org/dist/hive/hive-\${HIVE_VERSION}/apache-hive-\${HIVE_VERSION}-bin.tar.gz
+
+# Verify file exists
+ls -lh apache-hive-\${HIVE_VERSION}-bin.tar.gz || { echo 'Download failed'; exit 1; }
+
+# Extract
+echo 'Extracting...'
+tar -xzf apache-hive-\${HIVE_VERSION}-bin.tar.gz
+
+# Verify extraction
+ls -d apache-hive-\${HIVE_VERSION}-bin || { echo 'Extraction failed'; exit 1; }
+
+# Move
+mv apache-hive-\${HIVE_VERSION}-bin /opt/hive
+
+# Final verification
+ls -l /opt/hive/bin/hive || { echo 'Hive binary missing after install'; exit 1; }
+
+echo 'Hive installed successfully'
 "
 
 ########################################
