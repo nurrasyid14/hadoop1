@@ -27,7 +27,7 @@ HIVE_VERSION=${HIVE_VERSION}
 
 cd /opt
 
-echo '===== DEBUG: installing Hive ====='
+echo '===== Installing Hive ====='
 
 # Ensure tools exist
 command -v wget >/dev/null 2>&1 || { echo 'Installing wget...'; apt-get update && apt-get install -y wget; }
