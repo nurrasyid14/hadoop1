@@ -28,13 +28,24 @@ lxc exec "$NAMENODE" -- bash -c "
 export HADOOP_HOME=/opt/hadoop
 export PATH=\$PATH:\$HADOOP_HOME/bin
 
+lxc exec "$NAMENODE" -- bash -c "
+set -e
+
+HIVE_VERSION=${HIVE_VERSION}
+
 cd /opt
 
-if [ ! -d hive ]; then
-  wget https://downloads.apache.org/hive/hive-${HIVE_VERSION}/apache-hive-${HIVE_VERSION}-bin.tar.gz
-  tar -xzf apache-hive-${HIVE_VERSION}-bin.tar.gz
-  mv apache-hive-${HIVE_VERSION}-bin hive
+echo 'Installing Hive...'
+
+if [ ! -d /opt/hive ]; then
+  wget https://archive.apache.org/dist/hive/hive-\${HIVE_VERSION}/apache-hive-\${HIVE_VERSION}-bin.tar.gz
+  tar -xzf apache-hive-\${HIVE_VERSION}-bin.tar.gz
+  mv apache-hive-\${HIVE_VERSION}-bin /opt/hive
 fi
+
+ls -l /opt/hive || exit 1
+ls /opt/hive/bin/hive || exit 1
+"
 
 export HIVE_HOME=/opt/hive
 export PATH=\$PATH:\$HIVE_HOME/bin
@@ -112,7 +123,10 @@ echo "Initializing metastore..."
 lxc exec "$NAMENODE" -- bash -c "
 export HIVE_HOME=/opt/hive
 export PATH=\$PATH:\$HIVE_HOME/bin
-schematool -dbType derby -initSchema || true
+
+which schematool || { echo 'schematool missing'; exit 1; }
+
+schematool -dbType derby -initSchema
 "
 
 ########################################
