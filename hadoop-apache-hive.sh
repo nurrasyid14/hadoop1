@@ -151,7 +151,7 @@ hdfs dfs -put -f /opt/tez/* /apps/tez/
 # ENABLE TEZ IN HIVE
 ########################################
 
-llxc exec "$NAMENODE" -- bash -c "
+lxc exec "$NAMENODE" -- bash -c "
 export HIVE_HOME=/opt/hive
 
 cat > \$HIVE_HOME/conf/hive-site.xml <<EOF
