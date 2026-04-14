@@ -26,4 +26,5 @@ __pycache__/
 *.gz
 *.7z
 *.log
-
+*.xml
+workers

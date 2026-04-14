@@ -6,27 +6,21 @@ set -e
 ########################################
 
 NAMENODE="namenode"
-HIVE_VERSION=3.1.3
-TEZ_VERSION=0.10.2
+HIVE_VERSION="3.1.3"
+TEZ_VERSION="0.10.2"
 
 ########################################
 # PRECHECK
 ########################################
 
 echo "===== PRECHECK ====="
-
 lxc list > /dev/null 2>&1 || { echo "LXC not available"; exit 1; }
 
 ########################################
-# INSTALL HIVE (NAMENODE ONLY)
+# INSTALL HIVE
 ########################################
 
 echo "Installing Hive on $NAMENODE"
-
-lxc exec "$NAMENODE" -- bash -c "
-
-export HADOOP_HOME=/opt/hadoop
-export PATH=\$PATH:\$HADOOP_HOME/bin
 
 lxc exec "$NAMENODE" -- bash -c "
 set -e
@@ -35,55 +29,21 @@ HIVE_VERSION=${HIVE_VERSION}
 
 cd /opt
 
-echo 'Installing Hive...'
-
 if [ ! -d /opt/hive ]; then
+  echo 'Downloading Hive...'
   wget https://archive.apache.org/dist/hive/hive-\${HIVE_VERSION}/apache-hive-\${HIVE_VERSION}-bin.tar.gz
   tar -xzf apache-hive-\${HIVE_VERSION}-bin.tar.gz
   mv apache-hive-\${HIVE_VERSION}-bin /opt/hive
 fi
 
-ls -l /opt/hive || exit 1
-ls /opt/hive/bin/hive || exit 1
-"
-
-export HIVE_HOME=/opt/hive
-export PATH=\$PATH:\$HIVE_HOME/bin
-
-mkdir -p \$HIVE_HOME/conf
-
-cat > \$HIVE_HOME/conf/hive-site.xml <<EOF
-<configuration>
-
-  <property>
-    <name>fs.defaultFS</name>
-    <value>hdfs://namenode:9000</value>
-  </property>
-
-  <property>
-    <name>hive.metastore.warehouse.dir</name>
-    <value>/user/hive/warehouse</value>
-  </property>
-
-  <property>
-    <name>javax.jdo.option.ConnectionURL</name>
-    <value>jdbc:derby:;databaseName=metastore_db;create=true</value>
-  </property>
-
-  <property>
-    <name>javax.jdo.option.ConnectionDriverName</name>
-    <value>org.apache.derby.jdbc.EmbeddedDriver</value>
-  </property>
-
-</configuration>
-EOF
+ls /opt/hive/bin/hive
 "
 
 ########################################
 # WAIT FOR HDFS
 ########################################
 
-echo "Waiting for HDFS to be ready..."
+echo "Waiting for HDFS..."
 
 lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
 export HADOOP_HOME=/opt/hadoop
@@ -91,14 +51,12 @@ export PATH=\$PATH:\$HADOOP_HOME/bin
 
 for i in {1..10}; do
   hdfs dfs -ls / >/dev/null 2>&1 && exit 0
-  echo 'HDFS not ready yet... retrying'
+  echo 'Retrying HDFS...'
   sleep 3
 done
 
 exit 1
-" || { echo "ERROR: HDFS is not running"; exit 1; }
-
-echo "HDFS is ready"
+"
 
 ########################################
 # HDFS PREP
@@ -124,9 +82,7 @@ lxc exec "$NAMENODE" -- bash -c "
 export HIVE_HOME=/opt/hive
 export PATH=\$PATH:\$HIVE_HOME/bin
 
-which schematool || { echo 'schematool missing'; exit 1; }
-
-schematool -dbType derby -initSchema
+schematool -dbType derby -initSchema || true
 "
 
 ########################################
@@ -136,21 +92,24 @@ schematool -dbType derby -initSchema
 echo "Installing Tez..."
 
 lxc exec "$NAMENODE" -- bash -c "
+set -e
+
+TEZ_VERSION=${TEZ_VERSION}
 
 cd /opt
 
-if [ ! -d tez ]; then
-  wget https://downloads.apache.org/tez/${TEZ_VERSION}/apache-tez-${TEZ_VERSION}-bin.tar.gz
-  tar -xzf apache-tez-${TEZ_VERSION}-bin.tar.gz
-  mv apache-tez-${TEZ_VERSION}-bin tez
+if [ ! -d /opt/tez ]; then
+  wget https://archive.apache.org/dist/tez/\${TEZ_VERSION}/apache-tez-\${TEZ_VERSION}-bin.tar.gz
+  tar -xzf apache-tez-\${TEZ_VERSION}-bin.tar.gz
+  mv apache-tez-\${TEZ_VERSION}-bin /opt/tez
 fi
-
-export TEZ_HOME=/opt/tez
 "
 
 ########################################
-# UPLOAD TEZ TO HDFS
+# UPLOAD TEZ
 ########################################
+
+echo "Uploading Tez to HDFS..."
 
 lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
 export HADOOP_HOME=/opt/hadoop
@@ -161,8 +120,10 @@ hdfs dfs -put -f /opt/tez/* /apps/tez/
 "
 
 ########################################
-# ENABLE TEZ IN HIVE
+# CONFIGURE HIVE (FINAL)
 ########################################
+
+echo "Configuring Hive..."
 
 lxc exec "$NAMENODE" -- bash -c "
 export HIVE_HOME=/opt/hive
@@ -226,7 +187,7 @@ sleep 5
 # TEST
 ########################################
 
-echo "Running Hive test..."
+echo "Testing Hive..."
 
 lxc exec "$NAMENODE" -- bash -c "
 echo 'show databases;' | /opt/hive/bin/hive
