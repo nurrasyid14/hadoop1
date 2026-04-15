@@ -6,82 +6,93 @@ set -e
 ########################################
 
 NAMENODE="namenode"
+HADOOP_HOME="/opt/hadoop"
+HIVE_HOME="/opt/hive"
+TEZ_HOME="/opt/tez"
 HIVE_VERSION="3.1.3"
 TEZ_VERSION="0.10.2"
+HADOOP_USER="hdoop"
 
 ########################################
 # PRECHECK
 ########################################
 
 echo "===== PRECHECK ====="
-lxc list > /dev/null 2>&1 || { echo "LXC not available"; exit 1; }
+
+lxc list > /dev/null 2>&1 || { echo "❌ LXC not available"; exit 1; }
+
+lxc list | grep -q "$NAMENODE" || { echo "❌ Namenode not found"; exit 1; }
+
+echo "✅ LXC OK"
 
 ########################################
 # INSTALL HIVE
 ########################################
 
+echo "===== INSTALL HIVE ====="
+
 lxc exec "$NAMENODE" -- bash -c "
 set -e
 
-HIVE_VERSION=${HIVE_VERSION}
-
 cd /opt
 
-echo '===== Installing Hive ====='
+if [ ! -d hive ]; then
+  echo 'Downloading Hive...'
+  wget -q https://archive.apache.org/dist/hive/hive-${HIVE_VERSION}/apache-hive-${HIVE_VERSION}-bin.tar.gz
 
-# Ensure tools exist
-command -v wget >/dev/null 2>&1 || { echo 'Installing wget...'; apt-get update && apt-get install -y wget; }
+  echo 'Extracting Hive...'
+  tar -xzf apache-hive-${HIVE_VERSION}-bin.tar.gz
 
-# Download
-echo 'Downloading Hive...'
-wget -nv https://archive.apache.org/dist/hive/hive-\${HIVE_VERSION}/apache-hive-\${HIVE_VERSION}-bin.tar.gz
+  mv apache-hive-${HIVE_VERSION}-bin hive
+fi
 
-# Verify file exists
-ls -lh apache-hive-\${HIVE_VERSION}-bin.tar.gz || { echo 'Download failed'; exit 1; }
+echo 'Hive installed at /opt/hive'
+"
 
-# Extract
-echo 'Extracting...'
-tar -xzf apache-hive-\${HIVE_VERSION}-bin.tar.gz
+########################################
+# SET ENVIRONMENT
+########################################
 
-# Verify extraction
-ls -d apache-hive-\${HIVE_VERSION}-bin || { echo 'Extraction failed'; exit 1; }
+echo "===== CONFIGURE ENV ====="
 
-# Move
-mv apache-hive-\${HIVE_VERSION}-bin /opt/hive
+lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c "
+grep -q HIVE_HOME ~/.bashrc || cat >> ~/.bashrc <<EOF
 
-# Final verification
-ls -l /opt/hive/bin/hive || { echo 'Hive binary missing after install'; exit 1; }
-
-echo 'Hive installed successfully'
+# Hive
+export HIVE_HOME=${HIVE_HOME}
+export PATH=\$PATH:\$HIVE_HOME/bin
+EOF
 "
 
 ########################################
 # WAIT FOR HDFS
 ########################################
 
-echo "Waiting for HDFS..."
+echo "===== WAIT HDFS ====="
 
-lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
-export HADOOP_HOME=/opt/hadoop
+lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c "
+export HADOOP_HOME=${HADOOP_HOME}
 export PATH=\$PATH:\$HADOOP_HOME/bin
 
 for i in {1..10}; do
   hdfs dfs -ls / >/dev/null 2>&1 && exit 0
-  echo 'Retrying HDFS...'
+  echo 'Waiting HDFS...'
   sleep 3
 done
 
 exit 1
 "
 
+echo "✅ HDFS ready"
+
 ########################################
-# HDFS PREP
+# PREPARE HDFS FOR HIVE
 ########################################
 
-echo "Preparing HDFS..."
+echo "===== HDFS PREP ====="
 
-lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
-export HADOOP_HOME=/opt/hadoop
+lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c "
+export HADOOP_HOME=${HADOOP_HOME}
 export PATH=\$PATH:\$HADOOP_HOME/bin
 
 hdfs dfs -mkdir -p /user/hive/warehouse || true
@@ -89,62 +100,55 @@ hdfs dfs -chmod -R 777 /user/hive || true
 "
 
 ########################################
-# INIT METASTORE
+# INIT METASTORE (SAFE RESET)
 ########################################
 
-echo "Initializing metastore..."
+echo "===== INIT METASTORE ====="
 
-lxc exec "$NAMENODE" -- bash -c "
-export HIVE_HOME=/opt/hive
-export PATH=\$PATH:\$HIVE_HOME/bin
+lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c "
+rm -rf ~/metastore_db ~/derby.log || true
 
-schematool -dbType derby -initSchema || true
+${HIVE_HOME}/bin/schematool -dbType derby -initSchema
 "
 
 ########################################
 # INSTALL TEZ
 ########################################
 
-echo "Installing Tez..."
+echo "===== INSTALL TEZ ====="
 
 lxc exec "$NAMENODE" -- bash -c "
-set -e
-
-TEZ_VERSION=${TEZ_VERSION}
-
 cd /opt
 
-if [ ! -d /opt/tez ]; then
-  wget https://archive.apache.org/dist/tez/\${TEZ_VERSION}/apache-tez-\${TEZ_VERSION}-bin.tar.gz
-  tar -xzf apache-tez-\${TEZ_VERSION}-bin.tar.gz
-  mv apache-tez-\${TEZ_VERSION}-bin /opt/tez
+if [ ! -d tez ]; then
+  wget -q https://archive.apache.org/dist/tez/${TEZ_VERSION}/apache-tez-${TEZ_VERSION}-bin.tar.gz
+  tar -xzf apache-tez-${TEZ_VERSION}-bin.tar.gz
+  mv apache-tez-${TEZ_VERSION}-bin tez
 fi
 "
 
 ########################################
-# UPLOAD TEZ
+# UPLOAD TEZ TO HDFS
 ########################################
 
-echo "Uploading Tez to HDFS..."
+echo "===== UPLOAD TEZ ====="
 
-lxc exec "$NAMENODE" -- sudo -u hdoop bash -c "
-export HADOOP_HOME=/opt/hadoop
+lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c "
+export HADOOP_HOME=${HADOOP_HOME}
 export PATH=\$PATH:\$HADOOP_HOME/bin
 
 hdfs dfs -mkdir -p /apps/tez || true
-hdfs dfs -put -f /opt/tez/* /apps/tez/
+hdfs dfs -put -f ${TEZ_HOME}/* /apps/tez/
 "
 
 ########################################
-# CONFIGURE HIVE (FINAL)
+# CONFIGURE HIVE (TEZ ENABLE)
 ########################################
 
-echo "Configuring Hive..."
+echo "===== CONFIG HIVE ====="
 
 lxc exec "$NAMENODE" -- bash -c "
-export HIVE_HOME=/opt/hive
-
-cat > \$HIVE_HOME/conf/hive-site.xml <<'EOF'
+cat > ${HIVE_HOME}/conf/hive-site.xml <<'EOF'
 <configuration>
 
   <property>
@@ -187,14 +191,14 @@ EOF
 "
 
 ########################################
-# START SERVICES
+# START HIVE SERVICES
 ########################################
 
-echo "Starting Hive services..."
+echo "===== START HIVE ====="
 
 lxc exec "$NAMENODE" -- bash -c "
-nohup /opt/hive/bin/hive --service metastore > /root/metastore.log 2>&1 &
-nohup /opt/hive/bin/hive --service hiveserver2 > /root/hiveserver2.log 2>&1 &
+nohup ${HIVE_HOME}/bin/hive --service metastore > /tmp/metastore.log 2>&1 &
+nohup ${HIVE_HOME}/bin/hive --service hiveserver2 > /tmp/hiveserver2.log 2>&1 &
 "
 
 sleep 5
@@ -203,10 +207,13 @@ sleep 5
 # TEST
 ########################################
 
-echo "Testing Hive..."
+echo "===== TEST HIVE ====="
 
-lxc exec "$NAMENODE" -- bash -c "
-echo 'show databases;' | /opt/hive/bin/hive
+lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c "
+echo 'show databases;' | ${HIVE_HOME}/bin/hive
 "
 
-echo "===== HIVE COMPLETE ====="
+echo ""
+echo "=================================="
+echo "✅ HIVE + TEZ READY"
+echo "=================================="
