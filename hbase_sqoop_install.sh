@@ -20,30 +20,19 @@ HADOOP_USER="hdoop"
 CONTAINER="NameNode"
 
 ########################################
-# CHECK HADOOP
+# DOWNLOAD (HOST SIDE)
 ########################################
 
-echo "Checking Hadoop..."
+echo "Downloading HBase & Sqoop (if needed)..."
 
-lxc exec ${CONTAINER} -- test -d ${HADOOP_HOME} || {
-  echo "Hadoop not found. Abort."
-  exit 1
-}
+[ -f "$HBASE_TAR" ] || wget https://archive.apache.org/dist/hbase/${HBASE_VERSION}/${HBASE_TAR}
+[ -f "$SQOOP_TAR" ] || wget https://archive.apache.org/dist/sqoop/${SQOOP_VERSION}/${SQOOP_TAR}
 
 ########################################
-# DOWNLOAD (HOST)
+# PUSH TO CONTAINER
 ########################################
 
-echo "Downloading HBase & Sqoop..."
-
-[ -f "$HBASE_TAR" ] || wget -q https://archive.apache.org/dist/hbase/${HBASE_VERSION}/${HBASE_TAR}
-[ -f "$SQOOP_TAR" ] || wget -q https://archive.apache.org/dist/sqoop/${SQOOP_VERSION}/${SQOOP_TAR}
-
-########################################
-# PUSH FILES
-########################################
-
-echo "Pushing archives..."
+echo "Pushing to container..."
 
 lxc file push "$HBASE_TAR" ${CONTAINER}/opt/
 lxc file push "$SQOOP_TAR" ${CONTAINER}/opt/
@@ -55,10 +44,15 @@ lxc file push "$SQOOP_TAR" ${CONTAINER}/opt/
 echo "Installing HBase..."
 
 lxc exec ${CONTAINER} -- bash -c "
+
 cd /opt
+
 rm -rf hbase*
+
 tar xzf ${HBASE_TAR}
+
 ln -s hbase-${HBASE_VERSION} hbase
+
 chown -R ${HADOOP_USER}:${HADOOP_USER} hbase-${HBASE_VERSION}
 "
 
@@ -69,35 +63,23 @@ chown -R ${HADOOP_USER}:${HADOOP_USER} hbase-${HBASE_VERSION}
 echo "Installing Sqoop..."
 
 lxc exec ${CONTAINER} -- bash -c "
+
 cd /opt
+
 rm -rf sqoop*
+
 tar xzf ${SQOOP_TAR}
-sqoop_dir=\$(ls | grep sqoop-${SQOOP_VERSION})
-ln -sf \$sqoop_dir sqoop
-chown -R ${HADOOP_USER}:${HADOOP_USER} \$sqoop_dir
+
+ln -s sqoop-${SQOOP_VERSION}.bin__hadoop-3.2.0 sqoop
+
+chown -R ${HADOOP_USER}:${HADOOP_USER} sqoop-${SQOOP_VERSION}.bin__hadoop-3.2.0
 "
 
 ########################################
-# DETECT JAVA_HOME
+# CONFIGURE HBASE
 ########################################
 
-JAVA_HOME=$(lxc exec ${CONTAINER} -- bash -c \
-"readlink -f \$(which javac) | sed 's:/bin/javac$::'")
-
-echo "JAVA_HOME = $JAVA_HOME"
-
-########################################
-# CONFIG HBASE ENV
-########################################
-
-lxc exec ${CONTAINER} -- bash -c "
-sed -i 's|^# export JAVA_HOME=.*|export JAVA_HOME=${JAVA_HOME}|' \
-${HBASE_HOME}/conf/hbase-env.sh
-"
-
-########################################
-# HBASE CONFIG (SAFE MODE)
-########################################
+echo "Configuring HBase..."
 
 cat <<EOF > hbase-site.xml
 <configuration>
@@ -109,30 +91,25 @@ cat <<EOF > hbase-site.xml
 
  <property>
   <name>hbase.cluster.distributed</name>
-  <value>false</value>
+  <value>true</value>
+ </property>
+
+ <property>
+  <name>hbase.zookeeper.quorum</name>
+  <value>NameNode</value>
  </property>
 
 </configuration>
 EOF
 
 lxc file push hbase-site.xml \
-"${CONTAINER}/${HBASE_HOME}/conf/hbase-site.xml"
+${CONTAINER}${HBASE_HOME}/conf/hbase-site.xml
 
 ########################################
-# PREPARE HDFS FOR HBASE
+# UPDATE ENV (HBASE + SQOOP)
 ########################################
 
-echo "Preparing HDFS..."
-
-lxc exec ${CONTAINER} -- sudo -u ${HADOOP_USER} \
-${HADOOP_HOME}/bin/hdfs dfs -mkdir -p /hbase || true
-
-lxc exec ${CONTAINER} -- sudo -u ${HADOOP_USER} \
-${HADOOP_HOME}/bin/hdfs dfs -chown ${HADOOP_USER}:${HADOOP_USER} /hbase || true
-
-########################################
-# UPDATE ENV (.bashrc)
-########################################
+echo "Updating environment..."
 
 lxc exec ${CONTAINER} -- sudo -u ${HADOOP_USER} bash -c "
 
@@ -150,15 +127,17 @@ EOF
 "
 
 ########################################
-# LINK SQOOP TO HADOOP
+# FIX SQOOP-HADOOP LINK
 ########################################
+
+echo "Linking Sqoop to Hadoop..."
 
 lxc exec ${CONTAINER} -- bash -c "
 ln -sf ${HADOOP_HOME} ${SQOOP_HOME}/hadoop
 "
 
 ########################################
-# START SERVICES
+# START HBASE
 ########################################
 
 echo "Starting HBase..."
@@ -167,26 +146,11 @@ lxc exec ${CONTAINER} -- sudo -u ${HADOOP_USER} \
 ${HBASE_HOME}/bin/start-hbase.sh
 
 ########################################
-# VERIFY
-########################################
-
-echo "Running JPS check..."
-
-lxc exec ${CONTAINER} -- sudo -u ${HADOOP_USER} jps
-
-########################################
 # CLEANUP
 ########################################
 
 rm -f hbase-site.xml
 
 echo ""
-echo "======================================="
-echo " Big Data Stack Ready "
-echo "======================================="
+echo "HBase and Sqoop installed successfully."
 echo "HBase UI: http://<namenode-ip>:16010"
-echo "Run HBase shell:"
-echo "lxc exec NameNode -- sudo -u hdoop hbase shell"
-echo ""
-echo "Run Sqoop:"
-echo "lxc exec NameNode -- sudo -u hdoop sqoop version"
