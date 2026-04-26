@@ -1,6 +1,5 @@
 #!/bin/bash
-
-set -e
+set -euo pipefail
 
 ########################################
 # VARIABLES
@@ -10,147 +9,257 @@ HBASE_VERSION="2.4.17"
 SQOOP_VERSION="1.4.7"
 
 HBASE_TAR="hbase-${HBASE_VERSION}-bin.tar.gz"
-SQOOP_TAR="sqoop-${SQOOP_VERSION}.bin__hadoop-3.2.0.tar.gz"
+SQOOP_TAR="sqoop-${SQOOP_VERSION}.bin__hadoop-2.6.0.tar.gz"   # only available binary for 1.4.7; works with Hadoop 3
+
+HBASE_URL="https://archive.apache.org/dist/hbase/${HBASE_VERSION}/${HBASE_TAR}"
+SQOOP_URL="https://archive.apache.org/dist/sqoop/${SQOOP_VERSION}/${SQOOP_TAR}"
 
 HADOOP_HOME="/opt/hadoop"
 HBASE_HOME="/opt/hbase"
 SQOOP_HOME="/opt/sqoop"
-
 HADOOP_USER="hdoop"
-CONTAINER="NameNode"
+NAMENODE="namenode"
+
+########################################
+# HELPERS
+########################################
+
+log()  { echo ""; echo "===== $1 ====="; }
+ok()   { echo "✅  $1"; }
+fail() { echo "❌  $1"; exit 1; }
+
+detect_java_home() {
+  lxc exec "$NAMENODE" -- bash -c \
+    'readlink -f $(which javac) 2>/dev/null | sed "s:/bin/javac$::"'
+}
+
+run_as_hdoop() {
+  lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" \
+    env JAVA_HOME="$JAVA_HOME" \
+        HADOOP_HOME="$HADOOP_HOME" \
+        HBASE_HOME="$HBASE_HOME" \
+        SQOOP_HOME="$SQOOP_HOME" \
+        PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$HADOOP_HOME/sbin:$HBASE_HOME/bin:$SQOOP_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    bash -c "$1"
+}
+
+run_root() {
+  lxc exec "$NAMENODE" -- \
+    env JAVA_HOME="$JAVA_HOME" \
+        HADOOP_HOME="$HADOOP_HOME" \
+        HBASE_HOME="$HBASE_HOME" \
+        SQOOP_HOME="$SQOOP_HOME" \
+        PATH="$JAVA_HOME/bin:$HADOOP_HOME/bin:$HADOOP_HOME/sbin:$HBASE_HOME/bin:$SQOOP_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    bash -c "$1"
+}
+
+########################################
+# PRECHECK
+########################################
+
+log "PRECHECK"
+
+lxc list > /dev/null 2>&1      || fail "LXC not accessible"
+lxc list | grep -q "$NAMENODE" || fail "Container '$NAMENODE' not found"
+ok "LXC + container found"
+
+########################################
+# DETECT JAVA_HOME
+########################################
+
+log "DETECT JAVA_HOME"
+
+JAVA_HOME=$(detect_java_home)
+[ -z "$JAVA_HOME" ] && fail "Could not detect JAVA_HOME — is Java installed?"
+ok "JAVA_HOME: $JAVA_HOME"
 
 ########################################
 # DOWNLOAD (HOST SIDE)
 ########################################
 
-echo "Downloading HBase & Sqoop (if needed)..."
+log "DOWNLOAD"
 
-[ -f "$HBASE_TAR" ] || wget https://archive.apache.org/dist/hbase/${HBASE_VERSION}/${HBASE_TAR}
-[ -f "$SQOOP_TAR" ] || wget https://archive.apache.org/dist/sqoop/${SQOOP_VERSION}/${SQOOP_TAR}
+if [ ! -f "$HBASE_TAR" ]; then
+  echo "Downloading HBase ${HBASE_VERSION}..."
+  wget -q --show-progress "$HBASE_URL" || fail "HBase download failed"
+else
+  echo "HBase archive already present, skipping."
+fi
 
-########################################
-# PUSH TO CONTAINER
-########################################
+if [ ! -f "$SQOOP_TAR" ]; then
+  echo "Downloading Sqoop ${SQOOP_VERSION}..."
+  wget -q --show-progress "$SQOOP_URL" || fail "Sqoop download failed"
+else
+  echo "Sqoop archive already present, skipping."
+fi
 
-echo "Pushing to container..."
-
-lxc file push "$HBASE_TAR" ${CONTAINER}/opt/
-lxc file push "$SQOOP_TAR" ${CONTAINER}/opt/
+ok "Archives ready"
 
 ########################################
 # INSTALL HBASE
 ########################################
 
-echo "Installing HBase..."
+log "INSTALL HBASE"
 
-lxc exec ${CONTAINER} -- bash -c "
-
-cd /opt
-
-rm -rf hbase*
-
-tar xzf ${HBASE_TAR}
-
-ln -s hbase-${HBASE_VERSION} hbase
-
-chown -R ${HADOOP_USER}:${HADOOP_USER} hbase-${HBASE_VERSION}
-"
+if ! lxc exec "$NAMENODE" -- test -d /opt/hbase 2>/dev/null; then
+  echo "Pushing HBase archive to container..."
+  lxc file push "$HBASE_TAR" "${NAMENODE}/opt/${HBASE_TAR}"
+  run_root "
+    cd /opt
+    tar -xzf ${HBASE_TAR}
+    mv hbase-${HBASE_VERSION} hbase
+    rm ${HBASE_TAR}
+    chown -R ${HADOOP_USER}:${HADOOP_USER} /opt/hbase
+    echo 'HBase installed.'
+  "
+else
+  echo "HBase already installed, skipping."
+fi
 
 ########################################
 # INSTALL SQOOP
 ########################################
 
-echo "Installing Sqoop..."
+log "INSTALL SQOOP"
 
-lxc exec ${CONTAINER} -- bash -c "
+if ! lxc exec "$NAMENODE" -- test -d /opt/sqoop 2>/dev/null; then
+  echo "Pushing Sqoop archive to container..."
+  lxc file push "$SQOOP_TAR" "${NAMENODE}/opt/${SQOOP_TAR}"
+  run_root "
+    cd /opt
+    tar -xzf ${SQOOP_TAR}
+    mv sqoop-${SQOOP_VERSION}.bin__hadoop-2.6.0 sqoop
+    rm ${SQOOP_TAR}
+    chown -R ${HADOOP_USER}:${HADOOP_USER} /opt/sqoop
+    echo 'Sqoop installed.'
+  "
+else
+  echo "Sqoop already installed, skipping."
+fi
 
-cd /opt
+########################################
+# CONFIGURE HBASE (hbase-site.xml)
+########################################
 
-rm -rf sqoop*
+log "CONFIGURE HBASE"
 
-tar xzf ${SQOOP_TAR}
+# Write hbase-site.xml via temp file to avoid quoting issues
+cat > /tmp/gen_hbase_site.py << 'GENEOF'
+t = chr(110)+chr(97)+chr(109)+chr(101)
+xml  = '<configuration>\n\n'
+props = [
+  ('hbase.rootdir',                    'hdfs://namenode:9000/hbase'),
+  ('hbase.cluster.distributed',        'true'),
+  ('hbase.zookeeper.quorum',           'namenode'),
+  ('hbase.zookeeper.property.dataDir', '/opt/hbase/zookeeper'),
+]
+for k, v in props:
+    xml += '  <property>\n'
+    xml += '    <'+t+'>'+k+'</'+t+'>\n'
+    xml += '    <value>'+v+'</value>\n'
+    xml += '  </property>\n\n'
+xml += '</configuration>\n'
+open('/tmp/hbase-site.xml','w').write(xml)
+GENEOF
+python3 /tmp/gen_hbase_site.py
+rm /tmp/gen_hbase_site.py
+lxc file push /tmp/hbase-site.xml "${NAMENODE}${HBASE_HOME}/conf/hbase-site.xml"
+rm -f /tmp/hbase-site.xml
+ok "hbase-site.xml pushed"
 
-ln -s sqoop-${SQOOP_VERSION}.bin__hadoop-3.2.0 sqoop
+########################################
+# SET JAVA_HOME IN hbase-env.sh
+########################################
 
-chown -R ${HADOOP_USER}:${HADOOP_USER} sqoop-${SQOOP_VERSION}.bin__hadoop-3.2.0
+log "CONFIGURE HBASE ENV"
+
+run_root "
+grep -q JAVA_HOME ${HBASE_HOME}/conf/hbase-env.sh \
+  && sed -i 's|^.*JAVA_HOME=.*|export JAVA_HOME=${JAVA_HOME}|' ${HBASE_HOME}/conf/hbase-env.sh \
+  || echo 'export JAVA_HOME=${JAVA_HOME}' >> ${HBASE_HOME}/conf/hbase-env.sh
+echo 'hbase-env.sh updated'
 "
 
 ########################################
-# CONFIGURE HBASE
+# LINK SQOOP TO HADOOP
 ########################################
 
-echo "Configuring HBase..."
+log "LINK SQOOP TO HADOOP"
 
-cat <<EOF > hbase-site.xml
-<configuration>
-
- <property>
-  <name>hbase.rootdir</name>
-  <value>hdfs://NameNode:9000/hbase</value>
- </property>
-
- <property>
-  <name>hbase.cluster.distributed</name>
-  <value>true</value>
- </property>
-
- <property>
-  <name>hbase.zookeeper.quorum</name>
-  <value>NameNode</value>
- </property>
-
-</configuration>
-EOF
-
-lxc file push hbase-site.xml \
-${CONTAINER}${HBASE_HOME}/conf/hbase-site.xml
-
-########################################
-# UPDATE ENV (HBASE + SQOOP)
-########################################
-
-echo "Updating environment..."
-
-lxc exec ${CONTAINER} -- sudo -u ${HADOOP_USER} bash -c "
-
-cat >> ~/.bashrc <<EOF
-
-# HBase
-export HBASE_HOME=${HBASE_HOME}
-export PATH=\$PATH:\$HBASE_HOME/bin
-
-# Sqoop
-export SQOOP_HOME=${SQOOP_HOME}
-export PATH=\$PATH:\$SQOOP_HOME/bin
-
-EOF
+run_root "
+ln -sfn ${HADOOP_HOME} ${SQOOP_HOME}/hadoop
+echo 'Sqoop linked to Hadoop'
 "
 
 ########################################
-# FIX SQOOP-HADOOP LINK
+# UPDATE .bashrc (idempotent)
 ########################################
 
-echo "Linking Sqoop to Hadoop..."
+log "CONFIGURE ENV"
 
-lxc exec ${CONTAINER} -- bash -c "
-ln -sf ${HADOOP_HOME} ${SQOOP_HOME}/hadoop
+run_as_hdoop "
+for entry in \
+  'export HBASE_HOME=${HBASE_HOME}' \
+  'export SQOOP_HOME=${SQOOP_HOME}' \
+  'export PATH=\$PATH:\$HBASE_HOME/bin:\$SQOOP_HOME/bin'; do
+  grep -qF \"\$entry\" ~/.bashrc || echo \"\$entry\" >> ~/.bashrc
+done
+echo 'bashrc updated'
+"
+
+########################################
+# STOP STALE HBASE PROCESSES
+########################################
+
+log "STOP STALE HBASE"
+
+run_root "
+pkill -f 'HMaster'       2>/dev/null || true
+pkill -f 'HRegionServer' 2>/dev/null || true
+sleep 2
+echo 'Stale HBase processes cleared'
 "
 
 ########################################
 # START HBASE
 ########################################
 
-echo "Starting HBase..."
+log "START HBASE"
 
-lxc exec ${CONTAINER} -- sudo -u ${HADOOP_USER} \
-${HBASE_HOME}/bin/start-hbase.sh
+run_as_hdoop "${HBASE_HOME}/bin/start-hbase.sh"
+
+echo "Waiting for HMaster..."
+for i in $(seq 1 30); do
+  if run_as_hdoop "jps 2>/dev/null" | grep -q HMaster; then
+    ok "HMaster is running (${i}s)"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "--- HBase log tail ---"
+    run_root "ls ${HBASE_HOME}/logs/*.log 2>/dev/null | xargs tail -20 2>/dev/null || true"
+    fail "HMaster did not start in time"
+  fi
+  sleep 2
+done
 
 ########################################
-# CLEANUP
+# SMOKE TEST
 ########################################
 
-rm -f hbase-site.xml
+log "SMOKE TEST"
+
+run_as_hdoop "echo 'status' | ${HBASE_HOME}/bin/hbase shell 2>/dev/null | tail -5"
+
+########################################
+# SUMMARY
+########################################
+
+NAMENODE_IP=$(lxc list "$NAMENODE" -c 4 --format csv | cut -d',' -f1)
 
 echo ""
-echo "HBase and Sqoop installed successfully."
-echo "HBase UI: http://<namenode-ip>:16010"
+echo "=================================="
+ok "HBASE + SQOOP READY"
+echo "=================================="
+echo "  HBase UI : http://${NAMENODE_IP}:16010"
+echo "  HBase log: ${HBASE_HOME}/logs/"
+echo "=================================="
