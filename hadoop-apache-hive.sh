@@ -193,6 +193,9 @@ else
 fi
 "
 
+chown -R ${HADOOP_USER}:${HADOOP_USER} ${TEZ_HOME}
+
+
 ########################################
 # UPLOAD TEZ TO HDFS (idempotent)
 ########################################
@@ -200,13 +203,11 @@ fi
 log "UPLOAD TEZ TO HDFS"
 
 run_as_hdoop "
-if hdfs dfs -test -d /apps/tez; then
-  echo 'Tez already in HDFS, skipping upload.'
-else
-  hdfs dfs -mkdir -p /apps/tez
-  hdfs dfs -put ${TEZ_HOME}/* /apps/tez/
-  echo 'Tez uploaded to /apps/tez'
-fi
+hdfs dfs -rm -r -f /apps/tez || true
+hdfs dfs -mkdir -p /apps
+hdfs dfs -put ${TEZ_HOME} /apps/
+hdfs dfs -chmod -R 755 /apps/tez
+echo 'Tez uploaded correctly'
 "
 
 ########################################
