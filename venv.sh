@@ -93,6 +93,16 @@ case "$MODE" in
     "
     ;;
 
+  flume)
+    echo "Entering Flume environment..."
+    lxc exec "$NAMENODE" -- sudo -u "$USER" bash -c "
+    $ENV_COMMON
+    export FLUME_HOME=/opt/flume
+    export PATH=\$PATH:\$FLUME_HOME/bin
+    exec bash
+    "
+    ;;
+
   shell)
     echo "Raw shell..."
     lxc exec "$NAMENODE" -- sudo -u "$USER" bash
@@ -100,7 +110,7 @@ case "$MODE" in
 
   *)
     echo "Invalid option: $MODE"
-    echo "Usage: $0 [hive|hbase|hadoop|sqoop|shell]"
+    echo "Usage: $0 [hive|hbase|hadoop|sqoop|shell|flume]"
     exit 1
     ;;
 
