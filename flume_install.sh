@@ -17,7 +17,6 @@ HADOOP_USER="hdoop"
 FLUME_ARCHIVE="apache-flume-${FLUME_VERSION}-bin.tar.gz"
 FLUME_URL="https://archive.apache.org/dist/flume/${FLUME_VERSION}/${FLUME_ARCHIVE}"
 
-# Test agent configuration
 AGENT_NAME="agent"
 CONF_FILE="/home/${HADOOP_USER}/flume-netcat-hdfs.conf"
 LOG_FILE="/home/${HADOOP_USER}/flume-agent.log"
@@ -92,13 +91,26 @@ else
 fi
 
 ########################################
+# INSTALL NETCAT (for nc command)
+########################################
+
+log "INSTALL NETCAT"
+
+run_root "
+  if ! command -v nc &>/dev/null; then
+    echo 'Installing netcat-openbsd...'
+    apt-get update -qq && apt-get install -y -qq netcat-openbsd || yum install -y nc || true
+  fi
+"
+ok "nc available"
+
+########################################
 # INSTALL FLUME
 ########################################
 
 log "INSTALL FLUME"
 
 if ! lxc exec "$NAMENODE" -- test -d /opt/flume 2>/dev/null; then
-  # Download on the host (or inside container; we do inside to avoid another download)
   run_root "
     set -e
     cd /opt
@@ -120,26 +132,22 @@ fi
 
 log "CONFIGURE FLUME ENV"
 
-# Set JAVA_HOME in flume-env.sh (create it from template or append)
+# Set JAVA_HOME and Hadoop classpath in flume-env.sh
 run_root "
   cd ${FLUME_HOME}/conf
-  # Copy template if flume-env.sh doesn't exist
+  # Create flume-env.sh if missing
   if [ ! -f flume-env.sh ]; then
-    cp flume-env.sh.template flume-env.sh 2>/dev/null || touch flume-env.sh
+    cp -n flume-env.sh.template flume-env.sh 2>/dev/null || touch flume-env.sh
   fi
-  grep -q JAVA_HOME flume-env.sh \
+  # JAVA_HOME
+  grep -q 'JAVA_HOME' flume-env.sh \
     && sed -i 's|^.*JAVA_HOME=.*|export JAVA_HOME=${JAVA_HOME}|' flume-env.sh \
     || echo 'export JAVA_HOME=${JAVA_HOME}' >> flume-env.sh
+  # Hadoop classpath for HDFS sink
+  grep -q 'FLUME_CLASSPATH' flume-env.sh \
+    && sed -i 's|^.*FLUME_CLASSPATH=.*|export FLUME_CLASSPATH=\$('"${HADOOP_HOME}"'/bin/hadoop classpath)|' flume-env.sh \
+    || echo 'export FLUME_CLASSPATH=\$('"${HADOOP_HOME}"'/bin/hadoop classpath)' >> flume-env.sh
   echo 'flume-env.sh updated'
-"
-
-# Add Hadoop classpath (for HDFS sink) by setting FLUME_CLASSPATH in flume-env.sh
-run_root "
-  cat >> ${FLUME_HOME}/conf/flume-env.sh <<EOF
-
-# Add Hadoop classpath for HDFS support
-export FLUME_CLASSPATH=\$(${HADOOP_HOME}/bin/hadoop classpath)
-EOF
 "
 
 ########################################
@@ -173,7 +181,7 @@ ${AGENT_NAME}.sinks = hdfsSink
 
 # Configure the netcat source
 ${AGENT_NAME}.sources.netcatSrc.type = netcat
-${AGENT_NAME}.sources.netcatSrc.bind = localhost
+${AGENT_NAME}.sources.netcatSrc.bind = 0.0.0.0
 ${AGENT_NAME}.sources.netcatSrc.port = ${NC_PORT}
 
 # Configure the memory channel
@@ -196,7 +204,7 @@ ${AGENT_NAME}.sinks.hdfsSink.hdfs.fileType = DataStream
 ${AGENT_NAME}.sources.netcatSrc.channels = memoryChannel
 ${AGENT_NAME}.sinks.hdfsSink.channel = memoryChannel
 EOF
-echo 'Flume agent configuration written to ${CONF_FILE}'
+echo 'Flume agent configuration written'
 "
 
 ########################################
@@ -215,12 +223,12 @@ fi
 "
 
 ########################################
-# START FLUME AGENT (as background process)
+# START FLUME AGENT
 ########################################
 
 log "START FLUME AGENT"
 
-# Create HDFS directory for Flume output
+# Ensure HDFS output directory exists
 run_as_hdoop "hdfs dfs -mkdir -p /user/${HADOOP_USER}/flume/events" || true
 
 run_as_hdoop "
@@ -254,24 +262,24 @@ done
 
 log "SMOKE TEST"
 
-# Send a test line via netcat
-echo "Test message from Flume at $(date)" | lxc exec "$NAMENODE" -- nc localhost ${NC_PORT} || true
+# Send a test line via netcat (now nc is available)
+echo "Test message from Flume at $(date)" | lxc exec "$NAMENODE" -- nc -q 1 localhost ${NC_PORT} || true
 
-# Wait a few seconds for the data to be flushed to HDFS
-sleep 5
+# Give Flume a moment to write to HDFS
+sleep 10
 
-# Check if the file appeared in HDFS
+echo "Checking HDFS for flume events..."
 run_as_hdoop "
-echo 'Checking HDFS for flume events...'
-hdfs dfs -ls -R /user/${HADOOP_USER}/flume/events/ 2>/dev/null || true
-echo 'Attempting to read latest flume event file:'
-latest_file=\$(hdfs dfs -ls -R /user/${HADOOP_USER}/flume/events/ 2>/dev/null | grep flume-events | tail -1 | awk '{print \$NF}')
-if [ -n \"\$latest_file\" ]; then
-  hdfs dfs -cat \"\$latest_file\" | head -5
-  echo 'Smoke test successful – data landed in HDFS.'
-else
-  echo 'No event file found yet (may still be in buffer). You can check later.'
-fi
+  latest_file=\$(hdfs dfs -ls -R /user/${HADOOP_USER}/flume/events/ 2>/dev/null | grep flume-events | tail -1 | awk '{print \$NF}')
+  if [ -n \"\$latest_file\" ]; then
+    echo 'Latest event file: '\$latest_file
+    hdfs dfs -cat \"\$latest_file\" | head -5
+    echo 'Smoke test successful – data landed in HDFS.'
+  else
+    echo 'No event file found yet. Agent logs:'
+    tail -20 ${LOG_FILE}
+    echo 'You can manually test with: echo \"hello\" | nc localhost ${NC_PORT}'
+  fi
 "
 
 echo ""
@@ -282,7 +290,7 @@ echo "  Flume home   : ${FLUME_HOME}"
 echo "  Agent config : ${CONF_FILE}"
 echo "  Agent log    : ${LOG_FILE}"
 echo "  PID file     : ${PID_FILE}"
-echo "  Netcat port  : ${NC_PORT} (on localhost)"
+echo "  Netcat port  : ${NC_PORT}"
 echo "  HDFS output  : /user/${HADOOP_USER}/flume/events/"
 echo ""
 echo "  To stop agent: kill \$(cat ${PID_FILE}) inside the container"
