@@ -9,7 +9,7 @@ HBASE_VERSION="2.4.17"
 SQOOP_VERSION="1.4.7"
 
 HBASE_TAR="hbase-${HBASE_VERSION}-bin.tar.gz"
-SQOOP_TAR="sqoop-${SQOOP_VERSION}.bin__hadoop-2.6.0.tar.gz"   # only available binary for 1.4.7; works with Hadoop 3
+SQOOP_TAR="sqoop-${SQOOP_VERSION}.bin__hadoop-2.6.0.tar.gz"
 
 HBASE_URL="https://archive.apache.org/dist/hbase/${HBASE_VERSION}/${HBASE_TAR}"
 SQOOP_URL="https://archive.apache.org/dist/sqoop/${SQOOP_VERSION}/${SQOOP_TAR}"
@@ -138,31 +138,59 @@ else
 fi
 
 ########################################
+# SUPPRESS SQOOP WARNINGS
+########################################
+
+log "SUPPRESS SQOOP WARNINGS"
+
+# Create dummy directories for the optional components
+run_root "
+  mkdir -p ${SQOOP_HOME}/hcatalog
+  mkdir -p ${SQOOP_HOME}/accumulo
+  mkdir -p ${SQOOP_HOME}/zookeeper
+"
+
+# Configure sqoop-env.sh
+run_as_hdoop "
+  cp -n ${SQOOP_HOME}/conf/sqoop-env-template.sh ${SQOOP_HOME}/conf/sqoop-env.sh 2>/dev/null || true
+  cat >> ${SQOOP_HOME}/conf/sqoop-env.sh <<EOF
+
+# Override optional paths to suppress warnings
+export HCAT_HOME=${SQOOP_HOME}/hcatalog
+export ACCUMULO_HOME=${SQOOP_HOME}/accumulo
+export ZOOKEEPER_HOME=${SQOOP_HOME}/zookeeper
+EOF
+"
+
+ok "Sqoop warnings suppressed"
+
+########################################
 # CONFIGURE HBASE (hbase-site.xml)
 ########################################
 
 log "CONFIGURE HBASE"
 
-# Write hbase-site.xml via temp file to avoid quoting issues
-cat > /tmp/gen_hbase_site.py << 'GENEOF'
-t = chr(110)+chr(97)+chr(109)+chr(101)
-xml  = '<configuration>\n\n'
-props = [
-  ('hbase.rootdir',                    'hdfs://namenode:9000/hbase'),
-  ('hbase.cluster.distributed',        'true'),
-  ('hbase.zookeeper.quorum',           'namenode'),
-  ('hbase.zookeeper.property.dataDir', '/opt/hbase/zookeeper'),
-]
-for k, v in props:
-    xml += '  <property>\n'
-    xml += '    <'+t+'>'+k+'</'+t+'>\n'
-    xml += '    <value>'+v+'</value>\n'
-    xml += '  </property>\n\n'
-xml += '</configuration>\n'
-open('/tmp/hbase-site.xml','w').write(xml)
-GENEOF
-python3 /tmp/gen_hbase_site.py
-rm /tmp/gen_hbase_site.py
+cat > /tmp/hbase-site.xml <<EOF
+<configuration>
+  <property>
+    <name>hbase.rootdir</name>
+    <value>hdfs://namenode:9000/hbase</value>
+  </property>
+  <property>
+    <name>hbase.cluster.distributed</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>hbase.zookeeper.quorum</name>
+    <value>namenode</value>
+  </property>
+  <property>
+    <name>hbase.zookeeper.property.dataDir</name>
+    <value>/opt/hbase/zookeeper</value>
+  </property>
+</configuration>
+EOF
+
 lxc file push /tmp/hbase-site.xml "${NAMENODE}${HBASE_HOME}/conf/hbase-site.xml"
 rm -f /tmp/hbase-site.xml
 ok "hbase-site.xml pushed"
@@ -250,16 +278,12 @@ log "SMOKE TEST"
 
 run_as_hdoop "echo 'status' | ${HBASE_HOME}/bin/hbase shell 2>/dev/null | tail -5"
 
-########################################
-# SUMMARY
-########################################
-
-NAMENODE_IP=$(lxc list "$NAMENODE" -c 4 --format csv | cut -d',' -f1)
-
 echo ""
 echo "=================================="
 ok "HBASE + SQOOP READY"
 echo "=================================="
+NAMENODE_IP=$(lxc list "$NAMENODE" -c 4 --format csv | cut -d',' -f1)
 echo "  HBase UI : http://${NAMENODE_IP}:16010"
 echo "  HBase log: ${HBASE_HOME}/logs/"
+echo "  Sqoop    : run 'sqoop help' inside the container"
 echo "=================================="

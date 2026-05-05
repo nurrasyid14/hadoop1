@@ -75,21 +75,44 @@ JAVA_HOME=$(detect_java_home)
 ok "JAVA_HOME: $JAVA_HOME"
 
 ########################################
+# ENSURE SSH AND HOSTNAME RESOLUTION
+########################################
+
+log "NETWORK & SSH CHECK"
+
+# Quick ping test to datanodes
+for dn in "${DATANODES[@]}"; do
+  lxc exec "$NAMENODE" -- ping -c 1 "$dn" >/dev/null 2>&1 \
+    || fail "Cannot ping $dn – check bridge and hostnames"
+done
+
+# Ensure password‑less SSH from namenode to all nodes
+lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" bash -c '
+  for node in '"${ALL_NODES[*]}"'; do
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 $node "exit 0" \
+      || { echo "SSH to $node failed"; exit 1; }
+  done
+' || fail "Password‑less SSH is not configured – run the Hadoop cluster setup script first"
+
+ok "Network and SSH ready"
+
+########################################
 # ENSURE HADOOP IS RUNNING
 ########################################
 
 log "HADOOP HEALTH CHECK"
 
-hdfs_up() {
-  run_as_hdoop "hdfs dfsadmin -report > /dev/null 2>&1"
+hdfs_available() {
+  # Check if port 9000 is open on the namenode (from inside the container)
+  lxc exec "$NAMENODE" -- bash -c "timeout 3 bash -c 'echo >/dev/tcp/namenode/9000' 2>/dev/null" && return 0 || return 1
 }
 
-if hdfs_up; then
-  ok "HDFS already running"
+if hdfs_available; then
+  ok "HDFS already running on port 9000"
 else
   echo "HDFS is down — starting Hadoop cluster..."
 
-  # Ensure JAVA_HOME is set in hadoop-env.sh on all nodes
+  # Set JAVA_HOME in hadoop-env.sh on all nodes (may be missing if cluster was never started)
   for c in "${ALL_NODES[@]}"; do
     lxc exec "$c" -- bash -c "
       grep -q JAVA_HOME ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh \
@@ -98,6 +121,7 @@ else
     "
   done
 
+  # Start HDFS and YARN via the hdoop user
   lxc exec "$NAMENODE" -- sudo -u "$HADOOP_USER" \
     env JAVA_HOME="$JAVA_HOME" \
         HADOOP_HOME="$HADOOP_HOME" \
@@ -107,14 +131,17 @@ else
       ${HADOOP_HOME}/sbin/start-yarn.sh
     "
 
-  echo "Waiting for HDFS to become ready..."
+  echo "Waiting for HDFS port 9000..."
   for i in $(seq 1 30); do
-    hdfs_up && { ok "HDFS ready after ${i}s"; break; }
-    [ "$i" -eq 30 ] && fail "HDFS did not become ready — check namenode logs"
+    if hdfs_available; then
+      ok "HDFS ready after ${i}s"
+      break
+    fi
+    [ "$i" -eq 30 ] && fail "HDFS did not start – check namenode logs inside container"
     sleep 2
   done
 
-  echo "Waiting for safemode to exit..."
+  # Ensure safemode is off
   run_as_hdoop "hdfs dfsadmin -safemode wait" || true
   ok "Safemode exited"
 fi
@@ -189,12 +216,10 @@ else
   tar -xzf apache-tez-${TEZ_VERSION}-bin.tar.gz
   mv apache-tez-${TEZ_VERSION}-bin tez
   rm apache-tez-${TEZ_VERSION}-bin.tar.gz
+  chown -R ${HADOOP_USER}:${HADOOP_USER} /opt/tez
   echo 'Tez installed.'
 fi
 "
-
-chown -R ${HADOOP_USER}:${HADOOP_USER} ${TEZ_HOME}
-
 
 ########################################
 # UPLOAD TEZ TO HDFS (idempotent)
